@@ -1,0 +1,382 @@
+---
+title: "Fitness Tracker Analysis"
+author: "Nick"
+date: "11/9/2021"
+output: html_document
+---
+# Introduction
+
+The company I am analysing is BellaBeat, a high-tech manufacturer of health-focused products for women. I will be using data on general Fitbit users to identify
+trends in smart device usage, which would guide BellaBeat's marketing strategy. 
+
+
+```{r setup, include=FALSE}
+#Import libraries
+library(dplyr);library(lubridate);library(ggplot2);library(tidyr);library(readr);library(stringr);library(DT);library(forcats);library(GGally)
+library(plotly);library(reshape2)
+```
+
+## Import data
+  
+First, we want to import the files into R for examination. Given that there are 18 files, I decided to use a loop to read in the files, rather than risk my sanity by manually reading them in individually. At the same time, if other files are made available for analysis in the future, they can also be captured in the code, rather than having to manually read in new files each time.
+
+TThe files fall under 3 broad categories: Daily records, Hourly Records and Minute Records. There is a file containing records in seconds, but i will be omitting that file from analysis. Files also fall under 'Narrow' or 'Wide' categories, which contain the same data but are structured differently. I will omit the wide datasets and keep the narrow ones.
+
+## Identifying relevant files for analysis
+  
+```{r}
+#Retrieve file names
+filenames<-list.files(pattern = "merged", all.files = FALSE,
+           full.names = FALSE, recursive = FALSE,
+           ignore.case = FALSE, include.dirs = FALSE, no.. = FALSE)
+
+#Retrieve files that examine data at daily/hourly level
+files=rep(NA,length(filenames))
+for (i in 1:length(filenames)){
+  if (grepl("seconds|Wide",filenames[i])==FALSE){
+    files[i]<-str_extract(filenames[i],"\\w+")
+  }
+}
+
+#Remove irrelevant files/Keep only relevant files
+rel_files<-na.omit(files)
+```
+From a quick examination of the dataframes, i notice that daily Calories, daily Intensities and daily Steps are already included in the daily Activity datasets, so i remove them.  
+
+```{r}
+#Remove daily files except Activity
+rel_files<-rel_files[!rel_files%in%c("dailyCalories_merged","dailyIntensities_merged","dailySteps_merged")]
+```
+
+
+For each relevant file name, read in the datasets and stored them as individual dataframes.  
+```{r}
+for (i in 1:length(rel_files)){
+dat<-read.csv(file=paste0(rel_files[i],".csv"))
+assign(rel_files[i],dat)
+}
+rm(dat)
+```
+
+
+# Prepare data
+  
+In this section, I attempt to understand the datasets available, and identify any limitations with them.  
+I first process to check if there any NA values in our loaded datasets. NA values could potentially skew the results of our analysis, and should be identified early. Based on the number of NAs, I will make a judgement call on how to handle them.
+
+## Create a list to store all the dataframes.  
+
+Using a for loop, each dataframe in the list will be examined for NAs, and return the total number of NAs in an object, CheckNA.  
+Thereafter, identify which dataframe(s) contain NA values. 
+
+## Checking for NAs in datasets
+```{r}
+df_list<-lapply(rel_files,get)
+
+checkNA<-rep(NA,length(rel_files))
+for (i in 1:length(df_list)){
+checkNA[i]<-sum(apply(df_list[[i]],2,is.na))
+}
+checkNA
+
+rel_files[which(checkNA!=0)]
+```
+  
+  
+I found that Weight Log Info dataset contains multiple NAs. Further examination revealed that all the NAs originated from the column "Fat".  
+Particularly, Weight Log Info only has 67 observations, which suggests that only 2 observations actually have records on Fat. Here, I made the call to remove the Fat column from the file. 
+
+Removing "Fat" Column from Weight Log Dataset due to most entries being NA.  
+  
+```{r}
+weightLogInfo_merged<-weightLogInfo_merged%>%select(-Fat)
+```
+
+
+Next, we move on to check the number of unique participants in each dataset. The stated sample size was 33, but it would be pertinent to identify discrepancies between datasets in order to ensure consistency in our interpretation of results.
+```{r}
+participants<-rep(NA,length(df_list))
+for (i in 1:length(df_list)){
+participants[i]<-length(apply(df_list[[i]]["Id"],2,unique))
+}
+participants
+
+rel_files[c(13,16,17)]
+
+```
+From the results, it appears not everyone filled in their results for sleep monitoring and Weight. This could lead to biased results, so I decided to leave out these 3 datasets from the analysis.
+
+```{r}
+#Removing the 3 datasets
+rel_files<-rel_files[!rel_files%in%c("minuteSleep_merged","sleepDay_merged","weightLogInfo_merged")]
+rm(minuteSleep_merged,sleepDay_merged,weightLogInfo_merged)
+```
+
+
+# Cleaning Data
+  
+After selecting the datasets to be used for analysis and checking their integrity, I move on to clean the datasets.  
+This would be done seperate for daily datasets,hourly datasets and minute datasets.  
+The process involves:    
++ Standardizing column names
++ Standardizing data formats  
+  
+
+
+## Cleaning daily files
+  
+I noticed that the values in ActivityDate column for dailyActivites_merged is in string format, so i convert it to date format.
+  
+```{r}
+dailyActivity_merged$ActivityDate<-mdy(dailyActivity_merged$ActivityDate)
+dailyActivity_merged<-dailyActivity_merged%>%mutate(Day=weekdays(ActivityDate))
+
+```
+
+
+## Cleaning hourly files
+  
+  
+First, I will need to store hourly file names into an object.  
+Then, I retrieve their respective datasets and store them into a list.  
+This allows me to clean all datasets at once using loops.  
+```{r}
+#Creating list of hourly dataframes
+hourly_files=rep(NA,length(rel_files))
+for (i in 1:length(rel_files)){
+  if (grepl("hourly",rel_files[i])==TRUE){
+    hourly_files[i]<-str_extract(rel_files[i],"\\w+")
+  }
+}
+hourly_files<-na.omit(hourly_files)
+df_hourly_list<-lapply(hourly_files,get)
+
+```
+
+
+For hourly file datasets, date and time are merged into a column, which I will split into two seperate columns.  
+Naming conventions are also different for the dates, so I will be standardizing them.  
+
+```{r}
+
+#Extract merged date columns, transform them into Date and Time vectors, then merge them back into original dataframe
+for (i in 1:length(df_hourly_list)){
+date_column<-df_hourly_list[[i]][grepl("Activity|Day|Date",colnames(df_hourly_list[[i]]))] 
+new_date_vector<-mdy_hms(date_column[,1])
+Date<-as.Date(new_date_vector)
+Time<-format(new_date_vector,"%H:%M:%S")
+new_date_df<-data.frame(Date,Time)%>%mutate(Day=weekdays(Date))
+df_no_merged<-assign(hourly_files[i],get(hourly_files[i])%>%select(-which(grepl("Activity|Day|Date",colnames(df_hourly_list[[i]])))))#Remove old merged date column from original df
+assign(hourly_files[i],cbind(df_no_merged,new_date_df)) #Join new columns to original df
+}
+
+rm(date_column,new_date_vector,Date,Time,new_date_df) #Remove irrelevant dataframes and columns when done
+```
+
+
+Since hourly datasets have the same columns: Id, Date, Time and Day, they can be combined.  
+  
+```{r}
+#Merge Calories and Intensities first
+hourly_calories_intensities<-merge(hourlyCalories_merged,hourlyIntensities_merged,by=c("Id","Date","Time","Day"))
+#Merge all hourly datasets
+hourly_dataset<-merge(hourly_calories_intensities,hourlySteps_merged,by=c("Id","Date","Time","Day"))
+
+```
+
+## Cleaning minute data
+  
+  
+```{r}
+
+#Creating list of minute dataframes
+minute_files=rep(NA,length(rel_files))
+for (i in 1:length(rel_files)){
+  if (grepl("minute",rel_files[i])==TRUE){
+    minute_files[i]<-str_extract(rel_files[i],"\\w+")
+  }
+}
+minute_files<-na.omit(minute_files)
+df_minute_list<-lapply(minute_files,get)
+
+```
+
+Since all minute files have the Id and ActivityMinute columns, we can merge them, while seperating ActivityMinute into date and time columns respectively.   
+Also, by counting the number of minutes recorded each day per participant, we are able to get a sensing of the degree of usage of the tracker/app daily. 
+
+```{r}
+#Merging minute files
+
+minute_dataset<-minuteCaloriesNarrow_merged%>%
+  left_join(minuteIntensitiesNarrow_merged, by = c("Id", "ActivityMinute")) %>%
+  left_join(minuteStepsNarrow_merged, by = c("Id", "ActivityMinute")) %>%
+  mutate(ActivityMinute = mdy_hms(ActivityMinute)) %>%
+  separate(ActivityMinute,c("Date", "Time"), sep = " ") %>%
+  mutate(Date = ymd(Date), Day = weekdays(Date))
+
+#Usage
+
+#For each participant, identify the total time spent on the device
+usage<-minute_dataset%>%
+  group_by(Id)%>%
+  summarise(minute_use=n())
+
+#Find the average time spent on device
+mean(usage$minute_use)
+
+#Classify those below mean as low usage, and those above as high usage
+usage<-usage%>%
+  mutate(degree_use=ifelse(minute_use<mean(usage$minute_use),"Low","High"))
+```
+
+Merge usage levels to daily and hourly datasets
+```{r}
+daily_dataset<-dailyActivity_merged%>%left_join(usage)
+hourly_dataset<-hourly_dataset%>%left_join(usage)
+```
+
+
+# Analysis
+
+After standardizing column names and formats, we can proceed to analyze the dataset and identify trends and relationships to guide our high-level recommendation for BellaBeat. I begin my analysis with the Daily datasets. A few questions i have are:
++ What days of the week are users most active?
++ Is there a difference between weekday and weekend?
++ What is the proportion of intensive activity in a day?
++ What is the degree of usage of fitbit devices throughout the period?
++ What is the relationship between activity intensity and calories burnt?
+
+
+## Examine which days of the week are users most active
+
+```{r}
+#Daily
+glimpse(daily_dataset)
+person_activity=daily_dataset%>%group_by(Id)%>%summarize(no_of_days=n(),dist=sum(TotalDistance))
+
+#DT::datatable(person_activity,options = list(scrollX = TRUE))%>%formatRound(c('dist'),2)
+#%>%formatRound(c('TotalDistance','TrackerDistance','VeryActiveDistance','ModeratelyActiveDistance','LightActiveDistance'),2)
+
+week_activity=daily_dataset%>%group_by(Day)%>%summarize(avgcal=mean(Calories))
+
+#Plot of average calories consumed per day in a week
+#Days in a week are re-ordered from Monday to Sunday
+plot1<-week_activity%>%
+  mutate(Day=fct_relevel(Day,"Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"))%>%
+  ggplot(aes(x=Day,y=avgcal,fill=avgcal))+
+  geom_bar(stat="identity",width=0.7)+
+  labs(
+    title="Average Daily Calories per Week",
+    x="Day of the Week",
+    y="Average Calories"
+  )
+plot1
+
+```
+
+Finding 1 : Tuesdays and Saturdays have the highest average calories burned, suggesting more activity  
+Finding 2 : Thursdays have the least average calories burned in the week, suggesting the least activity
+
+
+
+## Examine the average time allocated to light, moderate, active and sedentary activities in the day
+
+```{r}
+plot2<-daily_dataset%>%
+  summarize(tot_active=sum(VeryActiveMinutes),tot_mod=sum(FairlyActiveMinutes),tot_light=sum(LightlyActiveMinutes),tot_sed=sum(SedentaryMinutes))%>%
+  mutate(Active=tot_active/(tot_active+tot_mod+tot_light+tot_sed),Moderate=tot_mod/(tot_active+tot_mod+tot_light+tot_sed),
+         Light=tot_light/(tot_active+tot_mod+tot_light+tot_sed),Sedentary=tot_sed/(tot_active+tot_mod+tot_light+tot_sed))%>%
+  select(-starts_with("tot"))%>%
+  melt()%>%
+ggplot(aes(x="",y=value,fill=variable))+geom_bar(stat="Identity")+
+  coord_polar("y")+
+  geom_col(color = "black")+
+  scale_fill_brewer()+
+  labs(title="Intensity levels for all participants",
+       subtitle = "Pie chart containing % distribution")+
+  theme(axis.title.x = element_blank(),axis.title.y = element_blank()) 
+ 
+plot2
+```
+  
+Finding 3: Time spent in sedentary activity took up most of participants' time in the day.
+
+
+## Examine activity throughtout the day
+    
+We can examine if there is a difference between activity during Weekdays and Weekends.
+
+```{r}
+day_group<-ifelse(hourly_dataset$Day%in%c("Monday","Tuesday","Wednesday","Thursday","Friday"),"Weekday","Weekend")
+hourly_dataset<-cbind(hourly_dataset,day_group)
+
+hourly_dataset2<-hourly_dataset%>%mutate(Time = as.POSIXct(hms::parse_hms(Time)))%>%
+  group_by(day_group,Time)%>%summarize(avgcal=mean(Calories))
+
+plot3<-hourly_dataset2%>%
+  ggplot(aes(x=Time,y=avgcal))+
+  geom_line(aes(color=day_group))+
+  scale_x_datetime(date_labels = "%H:%M")+
+  labs(title="Average Calories per Day",
+       y="Average Calories")+
+  labs(color = "Group")
+
+plot3
+
+```
+
+Finding 4: For weekdays, 5:30-6:30pm is the time period when average calories burnt is highest, suggesting that users are most active at this timing.  
+Finding 5: For Weekends, 12:00 - 1:00 pm is the time period with highest average calories burnt
+
+
+## Compare activities between frequent and infrequent users of the app
+
+```{r}
+daily_dataset%>%group_by(Id,degree_use)%>%summarize(cal=mean(Calories))%>%
+  ggplot(aes(x=degree_use,y=cal,fill=degree_use))+
+  geom_bar(stat="Identity")+
+  labs(title="Average calories burnt by degree of usage",
+       x="Degree of Usage",
+       y="Avg. Calories Burnt")
+
+```
+
+Finding 6: Frequency of usage of the app is positively correlated to higher average calories burnt throughout study period
+
+
+## Examine the correlations between intensity levels and calories burnt
+
+```{r}
+#ggpairs
+
+day_group<-ifelse(daily_dataset$Day%in%c("Monday","Tuesday","Wednesday","Thursday","Friday"),"Weekday","Weekend")
+new_daily<-cbind(daily_dataset,day_group)
+
+#Function to add regression line to scatter plots
+Regline <- function(data, mapping){
+  p <- ggplot(data = data, mapping = mapping) + 
+    geom_point() + 
+    geom_smooth(method=lm, fill="blue", color="blue")
+  p
+}
+
+ggpairs(new_daily,columns = 11:15,lower=list(continuous = Regline))
+
+#,ggplot2::aes(color=day_group)
+```
+
+Finding 7: Calories burnt is positively correlated with very active minutes  
+Finding 8: Calories burnt is negatively correlated with sedentary minutes
+
+# Insights and Recommendations
+
+From our analysis, we identified 8 important trends:
+1. Tuesdays and Saturdays have the highest average calories burned, suggesting more activity 
+2. Thursdays have the least average calories burned in the week, suggesting the least activity
+3. Time spent in sedentary activity took up most of participants' time in the day
+4. For weekdays, 5:30-6:30pm is the time period when average calories burnt is highest, suggesting that users are most active at this timing  
+5. For Weekends, 12:00 - 1:00 pm is the time period with highest average calories burnt
+6. Frequency of usage of the app is positively correlated to higher average calories burnt throughout study period
+7. Calories burnt is positively correlated with very active minutes  
+8. Calories burnt is negatively correlated with sedentary minutes
+
+Points 7 and 8 are more of an indicator that the data collected is normal. Higher levels of intensitive activities usually translate to more calories burnt, and the opposite holds true. 
